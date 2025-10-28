@@ -1,0 +1,1 @@
+# wp-auto-post-helper

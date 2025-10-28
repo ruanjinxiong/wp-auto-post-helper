@@ -106,6 +106,31 @@ function wpaph_rest_attachment_query_args( $args, $request ) {
 add_filter( 'rest_attachment_query', 'wpaph_rest_attachment_query_args', 10, 2 );
 
 /**
+ * Include the usage count in attachment objects prepared for JavaScript.
+ *
+ * @param array   $response   Prepared attachment data for JavaScript.
+ * @param WP_Post $attachment The attachment post object.
+ *
+ * @return array
+ */
+function wpaph_prepare_attachment_for_js( $response, $attachment ) {
+    if ( 'attachment' !== $attachment->post_type ) {
+        return $response;
+    }
+
+    $usage_count = get_post_meta( $attachment->ID, WPAPH_USAGE_META_KEY, true );
+
+    if ( '' === $usage_count ) {
+        $usage_count = 0;
+    }
+
+    $response['usageCount'] = (int) $usage_count;
+
+    return $response;
+}
+add_filter( 'wp_prepare_attachment_for_js', 'wpaph_prepare_attachment_for_js', 10, 2 );
+
+/**
  * Prime the usage count meta when attachments are created.
  *
  * @param int $post_id The attachment ID.
@@ -185,6 +210,110 @@ function wpaph_enqueue_tools_assets( $hook ) {
     );
 }
 add_action( 'admin_enqueue_scripts', 'wpaph_enqueue_tools_assets' );
+
+/**
+ * Enqueue media library enhancements.
+ *
+ * @param string $hook Current admin page hook suffix.
+ */
+function wpaph_enqueue_media_library_assets( $hook ) {
+    if ( 'upload.php' !== $hook ) {
+        return;
+    }
+
+    wp_enqueue_script(
+        'wpaph-media-library',
+        plugin_dir_url( __FILE__ ) . 'assets/js/media-library.js',
+        [ 'media-views', 'jquery' ],
+        '0.1.0',
+        true
+    );
+
+    wp_localize_script(
+        'wpaph-media-library',
+        'wpaphMediaLibrary',
+        [
+            'labels' => [
+                'usage' => __( 'Usage count', 'wp-auto-post-helper' ),
+            ],
+        ]
+    );
+}
+add_action( 'admin_enqueue_scripts', 'wpaph_enqueue_media_library_assets' );
+
+/**
+ * Add the usage count column to the media list view.
+ *
+ * @param string[] $columns Existing columns.
+ *
+ * @return string[]
+ */
+function wpaph_add_usage_count_column( $columns ) {
+    $columns['usage_count'] = __( 'Usage Count', 'wp-auto-post-helper' );
+
+    return $columns;
+}
+add_filter( 'manage_upload_columns', 'wpaph_add_usage_count_column' );
+
+/**
+ * Render the usage count column for media items.
+ *
+ * @param string $column  Column name.
+ * @param int    $post_id Attachment ID.
+ */
+function wpaph_render_usage_count_column( $column, $post_id ) {
+    if ( 'usage_count' !== $column ) {
+        return;
+    }
+
+    $usage_count = get_post_meta( $post_id, WPAPH_USAGE_META_KEY, true );
+
+    if ( '' === $usage_count ) {
+        $usage_count = 0;
+    }
+
+    echo esc_html( (int) $usage_count );
+}
+add_action( 'manage_media_custom_column', 'wpaph_render_usage_count_column', 10, 2 );
+
+/**
+ * Register the usage count column as sortable.
+ *
+ * @param array $columns Sortable columns.
+ *
+ * @return array
+ */
+function wpaph_make_usage_count_column_sortable( $columns ) {
+    $columns['usage_count'] = 'usage_count';
+
+    return $columns;
+}
+add_filter( 'manage_upload_sortable_columns', 'wpaph_make_usage_count_column_sortable' );
+
+/**
+ * Adjust the attachment query to handle sorting by usage count.
+ *
+ * @param WP_Query $query The current query instance.
+ */
+function wpaph_adjust_attachment_sorting( $query ) {
+    if ( ! is_admin() || ! $query->is_main_query() ) {
+        return;
+    }
+
+    $screen = function_exists( 'get_current_screen' ) ? get_current_screen() : null;
+
+    if ( ! $screen || 'upload' !== $screen->id ) {
+        return;
+    }
+
+    if ( 'usage_count' !== $query->get( 'orderby' ) ) {
+        return;
+    }
+
+    $query->set( 'meta_key', WPAPH_USAGE_META_KEY );
+    $query->set( 'orderby', 'meta_value_num' );
+}
+add_action( 'pre_get_posts', 'wpaph_adjust_attachment_sorting' );
 
 /**
  * Handle the AJAX request to recount media usage.

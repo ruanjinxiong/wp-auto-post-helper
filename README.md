@@ -8,6 +8,7 @@ WP Auto Post Helper adds a usage counter to every media item so you can easily d
 - 🔄 Exposes a `usage_count` field in the media REST API so external tools can read or update the value.
 - 🗂️ Enables sorting media library REST requests by usage count using `orderby=usage_count`.
 - 🛠️ Adds a Tools page button in wp-admin to rescan posts and refresh usage counts on demand.
+- 🖼️ Surfaces usage totals in the media library grid details panel and adds a sortable "Usage Count" column to the list view.
 
 ## Installation
 

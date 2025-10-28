@@ -120,3 +120,396 @@ function wpaph_prime_usage_count_meta( $post_id ) {
     }
 }
 add_action( 'add_attachment', 'wpaph_prime_usage_count_meta' );
+
+/**
+ * Register the Tools page entry for recounting media usage.
+ */
+function wpaph_register_tools_page() {
+    add_management_page(
+        __( 'Recount Media Usage', 'wp-auto-post-helper' ),
+        __( 'Recount Media Usage', 'wp-auto-post-helper' ),
+        'manage_options',
+        'wpaph-recount-media-usage',
+        'wpaph_render_tools_page'
+    );
+}
+add_action( 'admin_menu', 'wpaph_register_tools_page' );
+
+/**
+ * Render the Tools page UI.
+ */
+function wpaph_render_tools_page() {
+    ?>
+    <div class="wrap">
+        <h1><?php esc_html_e( 'Recount Media Usage', 'wp-auto-post-helper' ); ?></h1>
+        <p><?php esc_html_e( 'Scan your site content and update usage counts for every media item.', 'wp-auto-post-helper' ); ?></p>
+        <p>
+            <button type="button" class="button button-primary" id="wpaph-recount-button">
+                <?php esc_html_e( 'Recount Usage', 'wp-auto-post-helper' ); ?>
+            </button>
+        </p>
+        <p id="wpaph-recount-status" aria-live="polite"></p>
+    </div>
+    <?php
+}
+
+/**
+ * Enqueue assets for the Tools page.
+ *
+ * @param string $hook Current admin page hook suffix.
+ */
+function wpaph_enqueue_tools_assets( $hook ) {
+    if ( 'tools_page_wpaph-recount-media-usage' !== $hook ) {
+        return;
+    }
+
+    wp_enqueue_script(
+        'wpaph-tools',
+        plugin_dir_url( __FILE__ ) . 'assets/js/admin-tools.js',
+        [],
+        '0.1.0',
+        true
+    );
+
+    wp_localize_script(
+        'wpaph-tools',
+        'wpaphTools',
+        [
+            'ajaxUrl'  => admin_url( 'admin-ajax.php' ),
+            'nonce'    => wp_create_nonce( 'wpaph_recount_media_usage' ),
+            'messages' => [
+                'working'      => __( 'Recounting media usage…', 'wp-auto-post-helper' ),
+                'genericError' => __( 'Something went wrong. Please try again.', 'wp-auto-post-helper' ),
+            ],
+        ]
+    );
+}
+add_action( 'admin_enqueue_scripts', 'wpaph_enqueue_tools_assets' );
+
+/**
+ * Handle the AJAX request to recount media usage.
+ */
+function wpaph_ajax_recount_media_usage() {
+    check_ajax_referer( 'wpaph_recount_media_usage', 'nonce' );
+
+    if ( ! current_user_can( 'manage_options' ) ) {
+        wp_send_json_error(
+            [
+                'message' => __( 'You are not allowed to recount media usage.', 'wp-auto-post-helper' ),
+            ],
+            403
+        );
+    }
+
+    $result = wpaph_recount_media_usage_counts();
+
+    if ( is_wp_error( $result ) ) {
+        wp_send_json_error(
+            [
+                'message' => $result->get_error_message(),
+            ]
+        );
+    }
+
+    $result['message'] = sprintf(
+        /* translators: 1: Number of posts scanned. 2: Number of attachments updated. 3: Total usage references found. */
+        __( 'Recount completed. Scanned %1$d posts and updated %2$d attachments (total references: %3$d).', 'wp-auto-post-helper' ),
+        $result['posts_processed'],
+        $result['attachments_updated'],
+        $result['usage_total']
+    );
+
+    wp_send_json_success( $result );
+}
+add_action( 'wp_ajax_wpaph_recount_media_usage', 'wpaph_ajax_recount_media_usage' );
+
+/**
+ * Recount how often media items are used across site content.
+ *
+ * @return array|WP_Error Summary data about the recount operation.
+ */
+function wpaph_recount_media_usage_counts() {
+    $attachment_ids = get_posts(
+        [
+            'post_type'      => 'attachment',
+            'post_status'    => 'inherit',
+            'posts_per_page' => -1,
+            'fields'         => 'ids',
+        ]
+    );
+
+    $attachments_reset = 0;
+
+    foreach ( $attachment_ids as $attachment_id ) {
+        update_post_meta( $attachment_id, WPAPH_USAGE_META_KEY, 0 );
+        $attachments_reset++;
+    }
+
+    $post_types = get_post_types(
+        [
+            'public' => true,
+        ],
+        'names'
+    );
+
+    unset( $post_types['attachment'] );
+
+    if ( empty( $post_types ) ) {
+        return [
+            'posts_processed'      => 0,
+            'attachments_reset'    => $attachments_reset,
+            'attachments_updated'  => 0,
+            'usage_total'          => 0,
+        ];
+    }
+
+    $counts            = [];
+    $usage_total       = 0;
+    $posts_processed   = 0;
+    $attachments_updated = 0;
+    $page              = 1;
+
+    $query_args = [
+        'post_type'              => array_values( $post_types ),
+        'post_status'            => 'any',
+        'posts_per_page'         => 100,
+        'paged'                  => $page,
+        'orderby'                => 'ID',
+        'order'                  => 'ASC',
+        'ignore_sticky_posts'    => true,
+        'update_post_term_cache' => false,
+        'update_post_meta_cache' => false,
+    ];
+
+    do {
+        $query_args['paged'] = $page;
+        $query               = new WP_Query( $query_args );
+
+        if ( ! $query->have_posts() ) {
+            wp_reset_postdata();
+            break;
+        }
+
+        while ( $query->have_posts() ) {
+            $query->the_post();
+
+            $posts_processed++;
+            $post_content = get_post_field( 'post_content', get_the_ID() );
+            $ids          = wpaph_collect_attachment_ids_from_content( $post_content );
+
+            foreach ( $ids as $id ) {
+                if ( ! $id ) {
+                    continue;
+                }
+
+                if ( ! isset( $counts[ $id ] ) ) {
+                    $counts[ $id ] = 0;
+                }
+
+                $counts[ $id ]++;
+                $usage_total++;
+            }
+        }
+
+        wp_reset_postdata();
+        $page++;
+    } while ( $page <= $query->max_num_pages );
+
+    foreach ( $counts as $attachment_id => $count ) {
+        update_post_meta( $attachment_id, WPAPH_USAGE_META_KEY, $count );
+        $attachments_updated++;
+    }
+
+    return [
+        'posts_processed'      => $posts_processed,
+        'attachments_reset'    => $attachments_reset,
+        'attachments_updated'  => $attachments_updated,
+        'usage_total'          => $usage_total,
+    ];
+}
+
+/**
+ * Extract attachment IDs from post content.
+ *
+ * @param string $content Post content.
+ *
+ * @return int[] List of attachment IDs (duplicates preserved to reflect multiple uses).
+ */
+function wpaph_collect_attachment_ids_from_content( $content ) {
+    $ids = [];
+
+    if ( function_exists( 'parse_blocks' ) ) {
+        $ids = array_merge( $ids, wpaph_collect_attachment_ids_from_blocks( parse_blocks( $content ) ) );
+    }
+
+    $ids = array_merge( $ids, wpaph_collect_attachment_ids_from_html( $content ) );
+
+    return array_values(
+        array_filter(
+            $ids,
+            function ( $id ) {
+                return absint( $id ) > 0;
+            }
+        )
+    );
+}
+
+/**
+ * Extract attachment IDs from parsed block structures.
+ *
+ * @param array $blocks Parsed blocks from post content.
+ *
+ * @return int[]
+ */
+function wpaph_collect_attachment_ids_from_blocks( $blocks ) {
+    $ids = [];
+
+    foreach ( (array) $blocks as $block ) {
+        if ( empty( $block ) || ! is_array( $block ) ) {
+            continue;
+        }
+
+        if ( isset( $block['attrs'] ) && is_array( $block['attrs'] ) ) {
+            $ids = array_merge( $ids, wpaph_collect_attachment_ids_from_block_attrs( $block['attrs'] ) );
+        }
+
+        if ( ! empty( $block['innerHTML'] ) ) {
+            $ids = array_merge( $ids, wpaph_collect_attachment_ids_from_html( $block['innerHTML'] ) );
+        }
+
+        if ( ! empty( $block['innerContent'] ) && is_array( $block['innerContent'] ) ) {
+            foreach ( $block['innerContent'] as $inner_content ) {
+                $ids = array_merge( $ids, wpaph_collect_attachment_ids_from_html( $inner_content ) );
+            }
+        }
+
+        if ( ! empty( $block['innerBlocks'] ) ) {
+            $ids = array_merge( $ids, wpaph_collect_attachment_ids_from_blocks( $block['innerBlocks'] ) );
+        }
+    }
+
+    return $ids;
+}
+
+/**
+ * Collect attachment IDs from block attributes.
+ *
+ * @param array $attrs Block attributes.
+ *
+ * @return int[]
+ */
+function wpaph_collect_attachment_ids_from_block_attrs( $attrs ) {
+    $ids = [];
+
+    $single_keys = [ 'id', 'mediaId', 'mediaID', 'imageID', 'backgroundId', 'backgroundMediaId' ];
+
+    foreach ( $single_keys as $key ) {
+        if ( isset( $attrs[ $key ] ) ) {
+            $ids[] = absint( $attrs[ $key ] );
+        }
+    }
+
+    if ( isset( $attrs['ids'] ) ) {
+        $ids = array_merge( $ids, wpaph_normalize_id_list( $attrs['ids'] ) );
+    }
+
+    if ( isset( $attrs['mediaGallery'] ) && is_array( $attrs['mediaGallery'] ) ) {
+        foreach ( $attrs['mediaGallery'] as $item ) {
+            if ( is_array( $item ) && isset( $item['id'] ) ) {
+                $ids[] = absint( $item['id'] );
+            }
+        }
+    }
+
+    if ( isset( $attrs['attachments'] ) && is_array( $attrs['attachments'] ) ) {
+        foreach ( $attrs['attachments'] as $attachment ) {
+            if ( is_array( $attachment ) && isset( $attachment['id'] ) ) {
+                $ids[] = absint( $attachment['id'] );
+            }
+        }
+    }
+
+    return $ids;
+}
+
+/**
+ * Parse attachment IDs from HTML content.
+ *
+ * @param string $html HTML markup to inspect.
+ *
+ * @return int[]
+ */
+function wpaph_collect_attachment_ids_from_html( $html ) {
+    $ids = [];
+
+    if ( ! is_string( $html ) || '' === $html ) {
+        return $ids;
+    }
+
+    if ( preg_match_all( '/wp-image-([0-9]+)/', $html, $matches ) ) {
+        foreach ( $matches[1] as $match ) {
+            $ids[] = absint( $match );
+        }
+    }
+
+    if ( preg_match_all( '/data-id="([0-9]+)"/', $html, $matches ) ) {
+        foreach ( $matches[1] as $match ) {
+            $ids[] = absint( $match );
+        }
+    }
+
+    if ( preg_match_all( '/id="attachment_([0-9]+)"/', $html, $matches ) ) {
+        foreach ( $matches[1] as $match ) {
+            $ids[] = absint( $match );
+        }
+    }
+
+    if ( preg_match_all( '/\[gallery[^\]]*ids="([^\"]+)"/', $html, $matches ) ) {
+        foreach ( $matches[1] as $ids_list ) {
+            $ids = array_merge( $ids, wpaph_normalize_id_list( $ids_list ) );
+        }
+    }
+
+    if ( preg_match_all( '/\[caption[^\]]*id="attachment_([0-9]+)"/', $html, $matches ) ) {
+        foreach ( $matches[1] as $match ) {
+            $ids[] = absint( $match );
+        }
+    }
+
+    return $ids;
+}
+
+/**
+ * Normalize an ID list from either a comma-separated string or an array.
+ *
+ * @param mixed $value Potential ID list.
+ *
+ * @return int[]
+ */
+function wpaph_normalize_id_list( $value ) {
+    $ids = [];
+
+    if ( is_array( $value ) ) {
+        foreach ( $value as $item ) {
+            $item = absint( $item );
+
+            if ( $item ) {
+                $ids[] = $item;
+            }
+        }
+
+        return $ids;
+    }
+
+    $parts = preg_split( '/\s*,\s*/', (string) $value, -1, PREG_SPLIT_NO_EMPTY );
+
+    foreach ( $parts as $part ) {
+        $part = absint( $part );
+
+        if ( $part ) {
+            $ids[] = $part;
+        }
+    }
+
+    return $ids;
+}

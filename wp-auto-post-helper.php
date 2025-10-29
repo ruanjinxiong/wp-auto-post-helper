@@ -359,7 +359,6 @@ add_action( 'wp_ajax_wpaph_recount_media_usage', 'wpaph_ajax_recount_media_usage
  * @return array|WP_Error Summary data about the recount operation.
  */
 function wpaph_recount_media_usage_counts() {
-    $transient_key        = 'wpaph_usage_link_counts';
     $usage_links          = [];
     $usage_total          = 0;
     $posts_processed      = 0;
@@ -367,8 +366,6 @@ function wpaph_recount_media_usage_counts() {
     $attachments_touched  = 0;
     $page                 = 1;
     $upload_dir           = wp_get_upload_dir();
-
-    delete_transient( $transient_key );
 
     $query_args = [
         'post_type'              => 'post',
@@ -424,46 +421,81 @@ function wpaph_recount_media_usage_counts() {
         $page++;
     } while ( $page <= $query->max_num_pages );
 
-    set_transient( $transient_key, $usage_links, HOUR_IN_SECONDS );
-
     global $wpdb;
+    $processed_ids = [];
 
-    $rows = $wpdb->get_results(
-        $wpdb->prepare(
-            "SELECT p.ID, pm.meta_value FROM {$wpdb->posts} AS p INNER JOIN {$wpdb->postmeta} AS pm ON p.ID = pm.post_id WHERE p.post_type = %s AND pm.meta_key = %s",
-            'attachment',
-            '_wp_attached_file'
-        ),
-        ARRAY_A
-    );
+    foreach ( $usage_links as $relative => $count ) {
+        $count = (int) $count;
 
-    foreach ( (array) $rows as $row ) {
-        if ( ! isset( $row['ID'] ) ) {
+        $attachment_ids = $wpdb->get_col(
+            $wpdb->prepare(
+                "SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = %s AND meta_value = %s",
+                '_wp_attached_file',
+                $relative
+            )
+        );
+
+        if ( empty( $attachment_ids ) ) {
+            continue;
+        }
+
+        foreach ( $attachment_ids as $attachment_id ) {
+            $attachment_id = (int) $attachment_id;
+
+            if ( isset( $processed_ids[ $attachment_id ] ) ) {
+                continue;
+            }
+
+            $processed_ids[ $attachment_id ] = true;
+            $attachments_touched++;
+
+            $existing = get_post_meta( $attachment_id, WPAPH_USAGE_META_KEY, true );
+            $existing = '' === $existing ? null : (int) $existing;
+
+            if ( null === $existing || $existing !== $count ) {
+                update_post_meta( $attachment_id, WPAPH_USAGE_META_KEY, $count );
+                $attachments_updated++;
+            }
+        }
+    }
+
+    $remaining_query = "SELECT p.ID, pm.meta_value FROM {$wpdb->posts} AS p LEFT JOIN {$wpdb->postmeta} AS pm ON p.ID = pm.post_id AND pm.meta_key = %s WHERE p.post_type = %s";
+
+    if ( ! empty( $processed_ids ) ) {
+        $remaining_query .= ' AND p.ID NOT IN (' . implode( ',', array_map( 'intval', array_keys( $processed_ids ) ) ) . ')';
+    }
+
+    $remaining_sql  = $wpdb->prepare( $remaining_query, WPAPH_USAGE_META_KEY, 'attachment' );
+    $remaining_rows = $wpdb->get_results( $remaining_sql, ARRAY_A );
+
+    foreach ( (array) $remaining_rows as $row ) {
+        if ( empty( $row['ID'] ) ) {
             continue;
         }
 
         $attachment_id = (int) $row['ID'];
-        $file          = isset( $row['meta_value'] ) && is_string( $row['meta_value'] ) ? $row['meta_value'] : '';
-        $normalized    = $file ? wpaph_normalize_relative_path_for_attachment( $file ) : '';
-        $count         = ( $normalized && isset( $usage_links[ $normalized ] ) ) ? (int) $usage_links[ $normalized ] : 0;
 
+        if ( isset( $processed_ids[ $attachment_id ] ) ) {
+            continue;
+        }
+
+        $processed_ids[ $attachment_id ] = true;
         $attachments_touched++;
 
-        $existing = get_post_meta( $attachment_id, WPAPH_USAGE_META_KEY, true );
+        $existing = isset( $row['meta_value'] ) ? $row['meta_value'] : '';
         $existing = '' === $existing ? null : (int) $existing;
 
-        if ( null === $existing || $existing !== $count ) {
-            update_post_meta( $attachment_id, WPAPH_USAGE_META_KEY, $count );
+        if ( null === $existing || 0 !== $existing ) {
+            update_post_meta( $attachment_id, WPAPH_USAGE_META_KEY, 0 );
             $attachments_updated++;
         }
     }
 
     return [
-        'posts_processed'      => $posts_processed,
-        'attachments_touched'  => $attachments_touched,
-        'attachments_updated'  => $attachments_updated,
-        'usage_total'          => $usage_total,
-        'transient_key'        => $transient_key,
+        'posts_processed'     => $posts_processed,
+        'attachments_touched' => $attachments_touched,
+        'attachments_updated' => $attachments_updated,
+        'usage_total'         => $usage_total,
     ];
 }
 

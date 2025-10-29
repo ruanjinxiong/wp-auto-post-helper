@@ -341,9 +341,10 @@ function wpaph_ajax_recount_media_usage() {
     }
 
     $result['message'] = sprintf(
-        /* translators: 1: Number of posts scanned. 2: Number of attachments updated. 3: Total usage references found. */
-        __( 'Recount completed. Scanned %1$d posts and updated %2$d attachments (total references: %3$d).', 'wp-auto-post-helper' ),
+        /* translators: 1: Number of posts scanned. 2: Number of attachments reviewed. 3: Number of attachments updated. 4: Total usage references found. */
+        __( 'Recount completed. Scanned %1$d posts, reviewed %2$d attachments, updated %3$d (total references: %4$d).', 'wp-auto-post-helper' ),
         $result['posts_processed'],
+        $result['attachments_touched'],
         $result['attachments_updated'],
         $result['usage_total']
     );
@@ -361,45 +362,21 @@ function wpaph_recount_media_usage_counts() {
     $attachment_ids = get_posts(
         [
             'post_type'      => 'attachment',
-            'post_status'    => 'inherit',
+            'post_status'    => 'any',
             'posts_per_page' => -1,
             'fields'         => 'ids',
         ]
     );
 
-    $attachments_reset = 0;
-
-    foreach ( $attachment_ids as $attachment_id ) {
-        update_post_meta( $attachment_id, WPAPH_USAGE_META_KEY, 0 );
-        $attachments_reset++;
-    }
-
-    $post_types = get_post_types(
-        [
-            'public' => true,
-        ],
-        'names'
-    );
-
-    unset( $post_types['attachment'] );
-
-    if ( empty( $post_types ) ) {
-        return [
-            'posts_processed'      => 0,
-            'attachments_reset'    => $attachments_reset,
-            'attachments_updated'  => 0,
-            'usage_total'          => 0,
-        ];
-    }
-
-    $counts            = [];
-    $usage_total       = 0;
-    $posts_processed   = 0;
+    $counts              = [];
+    $usage_total         = 0;
+    $posts_processed     = 0;
     $attachments_updated = 0;
-    $page              = 1;
+    $attachments_touched = 0;
+    $page                = 1;
 
     $query_args = [
-        'post_type'              => array_values( $post_types ),
+        'post_type'              => 'post',
         'post_status'            => 'any',
         'posts_per_page'         => 100,
         'paged'                  => $page,
@@ -444,14 +421,28 @@ function wpaph_recount_media_usage_counts() {
         $page++;
     } while ( $page <= $query->max_num_pages );
 
-    foreach ( $counts as $attachment_id => $count ) {
-        update_post_meta( $attachment_id, WPAPH_USAGE_META_KEY, $count );
-        $attachments_updated++;
+    $all_attachment_ids = array_unique( array_merge( $attachment_ids, array_keys( $counts ) ) );
+
+    foreach ( $all_attachment_ids as $attachment_id ) {
+        if ( 'attachment' !== get_post_type( $attachment_id ) ) {
+            continue;
+        }
+
+        $attachments_touched++;
+        $count = isset( $counts[ $attachment_id ] ) ? (int) $counts[ $attachment_id ] : 0;
+
+        $existing = get_post_meta( $attachment_id, WPAPH_USAGE_META_KEY, true );
+        $existing = '' === $existing ? null : (int) $existing;
+
+        if ( null === $existing || $existing !== $count ) {
+            update_post_meta( $attachment_id, WPAPH_USAGE_META_KEY, $count );
+            $attachments_updated++;
+        }
     }
 
     return [
         'posts_processed'      => $posts_processed,
-        'attachments_reset'    => $attachments_reset,
+        'attachments_touched'  => $attachments_touched,
         'attachments_updated'  => $attachments_updated,
         'usage_total'          => $usage_total,
     ];

@@ -7,7 +7,7 @@ WP Auto Post Helper adds a usage counter to every media item so you can easily d
 - 📈 Tracks how many times each attachment is used by storing the count as post meta.
 - 🔄 Exposes a `usage_count` field in the media REST API so external tools can read or update the value.
 - 🗂️ Enables sorting media library REST requests by usage count using `orderby=usage_count`.
-- 🛠️ Adds a Tools page button in wp-admin to rescan posts and refresh usage counts on demand.
+- 🛠️ Adds a Tools page button in wp-admin to rescan blog posts and refresh usage counts on demand.
 - 🖼️ Surfaces usage totals in the media library grid details panel and adds a sortable "Usage Count" column to the list view.
 
 ## Installation
@@ -22,7 +22,7 @@ The `usage_count` field is available when creating or updating media items over 
 
 ## Recounting Usage in wp-admin
 
-Visit **Tools → Recount Media Usage** in the WordPress dashboard and press **Recount Usage** to trigger an AJAX-powered scan of your published content. The helper tallies how often each attachment appears in posts, galleries, and image blocks, then updates the stored usage counts automatically.
+Visit **Tools → Recount Media Usage** in the WordPress dashboard and press **Recount Usage** to trigger an AJAX-powered scan of your standard posts (`post` post type). The helper tallies how often each attachment appears in post content, galleries, and image blocks, stores the totals temporarily in memory, and writes the refreshed counts to each attachment when the scan completes.
 
 ## Requirements
 

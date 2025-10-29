@@ -862,13 +862,20 @@ function wpaph_recount_is_image_link_dead( $url, $upload_dir = null ) {
  * @return string[] List of image URLs (duplicates preserved).
  */
 function wpaph_collect_image_links_from_content( $content ) {
-    $links = [];
+    $links           = [];
+    $processed_htmls = [];
 
     if ( function_exists( 'parse_blocks' ) ) {
-        $links = array_merge( $links, wpaph_collect_image_links_from_blocks( parse_blocks( $content ) ) );
+        $links = array_merge(
+            $links,
+            wpaph_collect_image_links_from_blocks( parse_blocks( $content ), $processed_htmls )
+        );
     }
 
-    $links = array_merge( $links, wpaph_collect_image_links_from_html( $content ) );
+    $links = array_merge(
+        $links,
+        wpaph_collect_image_links_from_unique_html( $content, $processed_htmls )
+    );
 
     return array_values(
         array_filter(
@@ -887,8 +894,12 @@ function wpaph_collect_image_links_from_content( $content ) {
  *
  * @return string[]
  */
-function wpaph_collect_image_links_from_blocks( $blocks ) {
+function wpaph_collect_image_links_from_blocks( $blocks, &$processed_htmls = null ) {
     $links = [];
+
+    if ( ! is_array( $processed_htmls ) ) {
+        $processed_htmls = [];
+    }
 
     foreach ( (array) $blocks as $block ) {
         if ( empty( $block ) || ! is_array( $block ) ) {
@@ -900,21 +911,54 @@ function wpaph_collect_image_links_from_blocks( $blocks ) {
         }
 
         if ( ! empty( $block['innerHTML'] ) ) {
-            $links = array_merge( $links, wpaph_collect_image_links_from_html( $block['innerHTML'] ) );
+            $links = array_merge(
+                $links,
+                wpaph_collect_image_links_from_unique_html( $block['innerHTML'], $processed_htmls )
+            );
         }
 
         if ( ! empty( $block['innerContent'] ) && is_array( $block['innerContent'] ) ) {
             foreach ( $block['innerContent'] as $inner_content ) {
-                $links = array_merge( $links, wpaph_collect_image_links_from_html( $inner_content ) );
+                $links = array_merge(
+                    $links,
+                    wpaph_collect_image_links_from_unique_html( $inner_content, $processed_htmls )
+                );
             }
         }
 
         if ( ! empty( $block['innerBlocks'] ) ) {
-            $links = array_merge( $links, wpaph_collect_image_links_from_blocks( $block['innerBlocks'] ) );
+            $links = array_merge(
+                $links,
+                wpaph_collect_image_links_from_blocks( $block['innerBlocks'], $processed_htmls )
+            );
         }
     }
 
     return $links;
+}
+
+/**
+ * Run the HTML collector only once per unique snippet.
+ *
+ * @param string   $html             Raw HTML to inspect.
+ * @param string[] $processed_htmls  Map of processed HTML hashes.
+ *
+ * @return string[]
+ */
+function wpaph_collect_image_links_from_unique_html( $html, array &$processed_htmls ) {
+    if ( ! is_string( $html ) || '' === trim( $html ) ) {
+        return [];
+    }
+
+    $hash = md5( $html );
+
+    if ( isset( $processed_htmls[ $hash ] ) ) {
+        return [];
+    }
+
+    $processed_htmls[ $hash ] = true;
+
+    return wpaph_collect_image_links_from_html( $html );
 }
 
 /**

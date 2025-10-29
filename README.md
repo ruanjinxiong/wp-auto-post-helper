@@ -22,7 +22,7 @@ The `usage_count` field is available when creating or updating media items over 
 
 ## Recounting Usage in wp-admin
 
-Visit **Tools → Recount Media Usage** in the WordPress dashboard and press **Recount Usage** to trigger an AJAX-powered scan of your standard posts (`post` post type). The helper tallies how often each attachment appears in post content, galleries, and image blocks, stores the totals temporarily in memory, and writes the refreshed counts to each attachment when the scan completes.
+Visit **Tools → Recount Media Usage** in the WordPress dashboard and press **Recount Usage** to trigger an AJAX-powered scan of your standard posts (`post` post type). The helper tallies how often each attachment appears by parsing image links in post content, caches the per-link totals in a transient, and after the scan maps each link to an attachment using the `_wp_attached_file` meta before writing refreshed counts.
 
 ## Requirements
 

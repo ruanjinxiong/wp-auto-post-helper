@@ -368,12 +368,16 @@ function wpaph_recount_media_usage_counts() {
         ]
     );
 
-    $counts              = [];
-    $usage_total         = 0;
-    $posts_processed     = 0;
-    $attachments_updated = 0;
-    $attachments_touched = 0;
-    $page                = 1;
+    $transient_key        = 'wpaph_usage_link_counts';
+    $usage_links          = [];
+    $usage_total          = 0;
+    $posts_processed      = 0;
+    $attachments_updated  = 0;
+    $attachments_touched  = 0;
+    $page                 = 1;
+    $upload_dir           = wp_get_upload_dir();
+
+    delete_transient( $transient_key );
 
     $query_args = [
         'post_type'              => 'post',
@@ -401,18 +405,26 @@ function wpaph_recount_media_usage_counts() {
 
             $posts_processed++;
             $post_content = get_post_field( 'post_content', get_the_ID() );
-            $ids          = wpaph_collect_attachment_ids_from_content( $post_content );
+            $links        = wpaph_collect_image_links_from_content( $post_content );
 
-            foreach ( $ids as $id ) {
-                if ( ! $id ) {
+            foreach ( $links as $link ) {
+                $relative = wpaph_convert_image_url_to_relative_path( $link, $upload_dir );
+
+                if ( ! $relative ) {
                     continue;
                 }
 
-                if ( ! isset( $counts[ $id ] ) ) {
-                    $counts[ $id ] = 0;
+                $normalized = wpaph_normalize_relative_path_for_attachment( $relative );
+
+                if ( ! $normalized ) {
+                    continue;
                 }
 
-                $counts[ $id ]++;
+                if ( ! isset( $usage_links[ $normalized ] ) ) {
+                    $usage_links[ $normalized ] = 0;
+                }
+
+                $usage_links[ $normalized ]++;
                 $usage_total++;
             }
         }
@@ -421,15 +433,23 @@ function wpaph_recount_media_usage_counts() {
         $page++;
     } while ( $page <= $query->max_num_pages );
 
-    $all_attachment_ids = array_unique( array_merge( $attachment_ids, array_keys( $counts ) ) );
+    set_transient( $transient_key, $usage_links, HOUR_IN_SECONDS );
 
-    foreach ( $all_attachment_ids as $attachment_id ) {
+    foreach ( $attachment_ids as $attachment_id ) {
         if ( 'attachment' !== get_post_type( $attachment_id ) ) {
             continue;
         }
 
+        $file = get_post_meta( $attachment_id, '_wp_attached_file', true );
+
+        if ( ! is_string( $file ) || '' === $file ) {
+            $file = '';
+        }
+
+        $normalized = $file ? wpaph_normalize_relative_path_for_attachment( $file ) : '';
+        $count      = ( $normalized && isset( $usage_links[ $normalized ] ) ) ? (int) $usage_links[ $normalized ] : 0;
+
         $attachments_touched++;
-        $count = isset( $counts[ $attachment_id ] ) ? (int) $counts[ $attachment_id ] : 0;
 
         $existing = get_post_meta( $attachment_id, WPAPH_USAGE_META_KEY, true );
         $existing = '' === $existing ? null : (int) $existing;
@@ -445,44 +465,45 @@ function wpaph_recount_media_usage_counts() {
         'attachments_touched'  => $attachments_touched,
         'attachments_updated'  => $attachments_updated,
         'usage_total'          => $usage_total,
+        'transient_key'        => $transient_key,
     ];
 }
 
 /**
- * Extract attachment IDs from post content.
+ * Collect image links from post content.
  *
  * @param string $content Post content.
  *
- * @return int[] List of attachment IDs (duplicates preserved to reflect multiple uses).
+ * @return string[] List of image URLs (duplicates preserved).
  */
-function wpaph_collect_attachment_ids_from_content( $content ) {
-    $ids = [];
+function wpaph_collect_image_links_from_content( $content ) {
+    $links = [];
 
     if ( function_exists( 'parse_blocks' ) ) {
-        $ids = array_merge( $ids, wpaph_collect_attachment_ids_from_blocks( parse_blocks( $content ) ) );
+        $links = array_merge( $links, wpaph_collect_image_links_from_blocks( parse_blocks( $content ) ) );
     }
 
-    $ids = array_merge( $ids, wpaph_collect_attachment_ids_from_html( $content ) );
+    $links = array_merge( $links, wpaph_collect_image_links_from_html( $content ) );
 
     return array_values(
         array_filter(
-            $ids,
-            function ( $id ) {
-                return absint( $id ) > 0;
+            $links,
+            function ( $link ) {
+                return is_string( $link ) && '' !== trim( $link );
             }
         )
     );
 }
 
 /**
- * Extract attachment IDs from parsed block structures.
+ * Extract image links from parsed block structures.
  *
  * @param array $blocks Parsed blocks from post content.
  *
- * @return int[]
+ * @return string[]
  */
-function wpaph_collect_attachment_ids_from_blocks( $blocks ) {
-    $ids = [];
+function wpaph_collect_image_links_from_blocks( $blocks ) {
+    $links = [];
 
     foreach ( (array) $blocks as $block ) {
         if ( empty( $block ) || ! is_array( $block ) ) {
@@ -490,146 +511,248 @@ function wpaph_collect_attachment_ids_from_blocks( $blocks ) {
         }
 
         if ( isset( $block['attrs'] ) && is_array( $block['attrs'] ) ) {
-            $ids = array_merge( $ids, wpaph_collect_attachment_ids_from_block_attrs( $block['attrs'] ) );
+            $links = array_merge( $links, wpaph_collect_image_links_from_block_attrs( $block['attrs'] ) );
         }
 
         if ( ! empty( $block['innerHTML'] ) ) {
-            $ids = array_merge( $ids, wpaph_collect_attachment_ids_from_html( $block['innerHTML'] ) );
+            $links = array_merge( $links, wpaph_collect_image_links_from_html( $block['innerHTML'] ) );
         }
 
         if ( ! empty( $block['innerContent'] ) && is_array( $block['innerContent'] ) ) {
             foreach ( $block['innerContent'] as $inner_content ) {
-                $ids = array_merge( $ids, wpaph_collect_attachment_ids_from_html( $inner_content ) );
+                $links = array_merge( $links, wpaph_collect_image_links_from_html( $inner_content ) );
             }
         }
 
         if ( ! empty( $block['innerBlocks'] ) ) {
-            $ids = array_merge( $ids, wpaph_collect_attachment_ids_from_blocks( $block['innerBlocks'] ) );
+            $links = array_merge( $links, wpaph_collect_image_links_from_blocks( $block['innerBlocks'] ) );
         }
     }
 
-    return $ids;
+    return $links;
 }
 
 /**
- * Collect attachment IDs from block attributes.
+ * Collect image links from block attributes.
  *
  * @param array $attrs Block attributes.
  *
- * @return int[]
+ * @return string[]
  */
-function wpaph_collect_attachment_ids_from_block_attrs( $attrs ) {
-    $ids = [];
+function wpaph_collect_image_links_from_block_attrs( $attrs ) {
+    $links = [];
 
-    $single_keys = [ 'id', 'mediaId', 'mediaID', 'imageID', 'backgroundId', 'backgroundMediaId' ];
+    foreach ( $attrs as $key => $value ) {
+        if ( is_array( $value ) ) {
+            $links = array_merge( $links, wpaph_collect_image_links_from_block_attrs( $value ) );
+            continue;
+        }
 
-    foreach ( $single_keys as $key ) {
-        if ( isset( $attrs[ $key ] ) ) {
-            $ids[] = absint( $attrs[ $key ] );
+        if ( in_array( $key, [ 'url', 'src', 'href' ], true ) && is_string( $value ) ) {
+            $links[] = $value;
         }
     }
 
-    if ( isset( $attrs['ids'] ) ) {
-        $ids = array_merge( $ids, wpaph_normalize_id_list( $attrs['ids'] ) );
-    }
-
-    if ( isset( $attrs['mediaGallery'] ) && is_array( $attrs['mediaGallery'] ) ) {
-        foreach ( $attrs['mediaGallery'] as $item ) {
-            if ( is_array( $item ) && isset( $item['id'] ) ) {
-                $ids[] = absint( $item['id'] );
-            }
-        }
-    }
-
-    if ( isset( $attrs['attachments'] ) && is_array( $attrs['attachments'] ) ) {
-        foreach ( $attrs['attachments'] as $attachment ) {
-            if ( is_array( $attachment ) && isset( $attachment['id'] ) ) {
-                $ids[] = absint( $attachment['id'] );
-            }
-        }
-    }
-
-    return $ids;
+    return $links;
 }
 
 /**
- * Parse attachment IDs from HTML content.
+ * Extract image links from raw HTML strings.
  *
- * @param string $html HTML markup to inspect.
+ * @param string $html HTML content.
  *
- * @return int[]
+ * @return string[]
  */
-function wpaph_collect_attachment_ids_from_html( $html ) {
-    $ids = [];
+function wpaph_collect_image_links_from_html( $html ) {
+    $links = [];
 
-    if ( ! is_string( $html ) || '' === $html ) {
-        return $ids;
+    if ( ! is_string( $html ) || '' === trim( $html ) ) {
+        return $links;
     }
 
-    if ( preg_match_all( '/wp-image-([0-9]+)/', $html, $matches ) ) {
-        foreach ( $matches[1] as $match ) {
-            $ids[] = absint( $match );
+    libxml_use_internal_errors( true );
+
+    $dom    = new DOMDocument();
+    $loaded = $dom->loadHTML( '<meta http-equiv="content-type" content="text/html; charset=utf-8">' . $html );
+
+    if ( ! $loaded ) {
+        libxml_clear_errors();
+        libxml_use_internal_errors( false );
+        return $links;
+    }
+
+    $image_tags = [ 'img', 'source' ];
+
+    foreach ( $image_tags as $tag_name ) {
+        $nodes = $dom->getElementsByTagName( $tag_name );
+
+        foreach ( $nodes as $node ) {
+            if ( $node->hasAttribute( 'srcset' ) ) {
+                $links = array_merge( $links, wpaph_extract_links_from_srcset( $node->getAttribute( 'srcset' ) ) );
+            }
+
+            if ( $node->hasAttribute( 'data-src' ) ) {
+                $links[] = $node->getAttribute( 'data-src' );
+            }
+
+            if ( $node->hasAttribute( 'src' ) ) {
+                $links[] = $node->getAttribute( 'src' );
+            }
         }
     }
 
-    if ( preg_match_all( '/data-id="([0-9]+)"/', $html, $matches ) ) {
-        foreach ( $matches[1] as $match ) {
-            $ids[] = absint( $match );
-        }
-    }
+    libxml_clear_errors();
+    libxml_use_internal_errors( false );
 
-    if ( preg_match_all( '/id="attachment_([0-9]+)"/', $html, $matches ) ) {
-        foreach ( $matches[1] as $match ) {
-            $ids[] = absint( $match );
-        }
-    }
-
-    if ( preg_match_all( '/\[gallery[^\]]*ids="([^\"]+)"/', $html, $matches ) ) {
-        foreach ( $matches[1] as $ids_list ) {
-            $ids = array_merge( $ids, wpaph_normalize_id_list( $ids_list ) );
-        }
-    }
-
-    if ( preg_match_all( '/\[caption[^\]]*id="attachment_([0-9]+)"/', $html, $matches ) ) {
-        foreach ( $matches[1] as $match ) {
-            $ids[] = absint( $match );
-        }
-    }
-
-    return $ids;
+    return $links;
 }
 
 /**
- * Normalize an ID list from either a comma-separated string or an array.
+ * Extract individual image URLs from a srcset string.
  *
- * @param mixed $value Potential ID list.
+ * @param string $srcset Srcset attribute value.
  *
- * @return int[]
+ * @return string[]
  */
-function wpaph_normalize_id_list( $value ) {
-    $ids = [];
-
-    if ( is_array( $value ) ) {
-        foreach ( $value as $item ) {
-            $item = absint( $item );
-
-            if ( $item ) {
-                $ids[] = $item;
-            }
-        }
-
-        return $ids;
+function wpaph_extract_links_from_srcset( $srcset ) {
+    if ( ! is_string( $srcset ) || '' === trim( $srcset ) ) {
+        return [];
     }
 
-    $parts = preg_split( '/\s*,\s*/', (string) $value, -1, PREG_SPLIT_NO_EMPTY );
+    $links      = [];
+    $candidates = array_map( 'trim', explode( ',', $srcset ) );
 
-    foreach ( $parts as $part ) {
-        $part = absint( $part );
+    foreach ( $candidates as $candidate ) {
+        if ( '' === $candidate ) {
+            continue;
+        }
 
-        if ( $part ) {
-            $ids[] = $part;
+        $parts = preg_split( '/\s+/', $candidate );
+
+        if ( ! empty( $parts[0] ) ) {
+            $links[] = $parts[0];
         }
     }
 
-    return $ids;
+    return $links;
+}
+
+/**
+ * Convert an image URL to a relative upload path.
+ *
+ * @param string $url        Image URL.
+ * @param array  $upload_dir Upload directory data.
+ *
+ * @return string Relative path or empty string if it cannot be determined.
+ */
+function wpaph_convert_image_url_to_relative_path( $url, $upload_dir = null ) {
+    if ( ! is_string( $url ) || '' === trim( $url ) ) {
+        return '';
+    }
+
+    $url = trim( $url );
+
+    if ( null === $upload_dir ) {
+        $upload_dir = wp_get_upload_dir();
+    }
+
+    if ( empty( $upload_dir['baseurl'] ) ) {
+        return '';
+    }
+
+    $url_parts  = wp_parse_url( $url );
+    $baseurl    = $upload_dir['baseurl'];
+    $base_parts = wp_parse_url( $baseurl );
+    $base_path  = isset( $base_parts['path'] ) ? untrailingslashit( $base_parts['path'] ) : '';
+
+    if ( false === $url_parts ) {
+        return '';
+    }
+
+    if ( isset( $url_parts['host'] ) ) {
+        $host      = strtolower( $url_parts['host'] );
+        $base_host = isset( $base_parts['host'] ) ? strtolower( $base_parts['host'] ) : '';
+
+        if ( $base_host && $host !== $base_host ) {
+            return '';
+        }
+    }
+
+    if ( empty( $url_parts['path'] ) ) {
+        return '';
+    }
+
+    $path = $url_parts['path'];
+
+    if ( $base_path && 0 === strpos( $path, $base_path . '/' ) ) {
+        $path = substr( $path, strlen( $base_path . '/' ) );
+    } elseif ( $base_path && $path === $base_path ) {
+        $path = '';
+    } elseif ( $base_path ) {
+        return '';
+    } else {
+        $path = ltrim( $path, '/' );
+    }
+
+    if ( '' === $path ) {
+        return '';
+    }
+
+    return $path;
+}
+
+/**
+ * Normalize a relative upload path so it maps to the original attachment file.
+ *
+ * @param string $path Relative path within the uploads directory.
+ *
+ * @return string
+ */
+function wpaph_normalize_relative_path_for_attachment( $path ) {
+    if ( ! is_string( $path ) || '' === trim( $path ) ) {
+        return '';
+    }
+
+    $path = ltrim( $path, '/' );
+
+    $info      = pathinfo( $path );
+    $dirname   = isset( $info['dirname'] ) && '.' !== $info['dirname'] ? $info['dirname'] : '';
+    $extension = isset( $info['extension'] ) ? $info['extension'] : '';
+    $filename  = isset( $info['filename'] ) ? $info['filename'] : '';
+
+    if ( '' === $filename ) {
+        return $path;
+    }
+
+    $normalized_filename = wpaph_strip_size_suffix_from_filename( $filename );
+
+    $normalized_path = $dirname ? $dirname . '/' . $normalized_filename : $normalized_filename;
+
+    if ( $extension ) {
+        $normalized_path .= '.' . $extension;
+    }
+
+    return $normalized_path;
+}
+
+/**
+ * Remove generated size suffixes from attachment filenames.
+ *
+ * @param string $filename Filename without extension.
+ *
+ * @return string
+ */
+function wpaph_strip_size_suffix_from_filename( $filename ) {
+    if ( ! is_string( $filename ) || '' === $filename ) {
+        return '';
+    }
+
+    $normalized = $filename;
+
+    do {
+        $previous  = $normalized;
+        $normalized = preg_replace( '/-(?:\d+x\d+|scaled(?:-\d+)?)(?=$)/i', '', $normalized );
+    } while ( $previous !== $normalized );
+
+    return $normalized;
 }

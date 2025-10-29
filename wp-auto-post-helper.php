@@ -972,16 +972,39 @@ function wpaph_collect_image_links_from_html( $html ) {
         $nodes = $dom->getElementsByTagName( $tag_name );
 
         foreach ( $nodes as $node ) {
-            if ( $node->hasAttribute( 'srcset' ) ) {
-                $links = array_merge( $links, wpaph_extract_links_from_srcset( $node->getAttribute( 'srcset' ) ) );
-            }
+            $candidates = [];
 
             if ( $node->hasAttribute( 'data-src' ) ) {
-                $links[] = $node->getAttribute( 'data-src' );
+                $candidates[] = $node->getAttribute( 'data-src' );
             }
 
             if ( $node->hasAttribute( 'src' ) ) {
-                $links[] = $node->getAttribute( 'src' );
+                $candidates[] = $node->getAttribute( 'src' );
+            }
+
+            $srcset_attributes = [];
+
+            if ( $node->hasAttribute( 'srcset' ) ) {
+                $srcset_attributes[] = $node->getAttribute( 'srcset' );
+            }
+
+            if ( $node->hasAttribute( 'data-srcset' ) ) {
+                $srcset_attributes[] = $node->getAttribute( 'data-srcset' );
+            }
+
+            foreach ( $srcset_attributes as $srcset ) {
+                $primary_link = wpaph_extract_primary_link_from_srcset( $srcset );
+
+                if ( '' !== $primary_link ) {
+                    $candidates[] = $primary_link;
+                }
+            }
+
+            foreach ( $candidates as $candidate ) {
+                if ( is_string( $candidate ) && '' !== trim( $candidate ) ) {
+                    $links[] = $candidate;
+                    break;
+                }
             }
         }
     }
@@ -993,19 +1016,20 @@ function wpaph_collect_image_links_from_html( $html ) {
 }
 
 /**
- * Extract individual image URLs from a srcset string.
+ * Extract the primary image URL from a srcset string.
  *
  * @param string $srcset Srcset attribute value.
  *
- * @return string[]
+ * @return string
  */
-function wpaph_extract_links_from_srcset( $srcset ) {
+function wpaph_extract_primary_link_from_srcset( $srcset ) {
     if ( ! is_string( $srcset ) || '' === trim( $srcset ) ) {
-        return [];
+        return '';
     }
 
-    $links      = [];
-    $candidates = array_map( 'trim', explode( ',', $srcset ) );
+    $selected_link     = '';
+    $selected_priority = 0;
+    $candidates        = array_map( 'trim', explode( ',', $srcset ) );
 
     foreach ( $candidates as $candidate ) {
         if ( '' === $candidate ) {
@@ -1014,12 +1038,32 @@ function wpaph_extract_links_from_srcset( $srcset ) {
 
         $parts = preg_split( '/\s+/', $candidate );
 
-        if ( ! empty( $parts[0] ) ) {
-            $links[] = $parts[0];
+        if ( empty( $parts[0] ) ) {
+            continue;
+        }
+
+        $link       = $parts[0];
+        $descriptor = isset( $parts[1] ) ? trim( $parts[1] ) : '';
+
+        if ( '' === $descriptor ) {
+            return $link;
+        }
+
+        if ( preg_match( '/^(\d+(?:\.\d+)?)w$/i', $descriptor, $matches ) ) {
+            $priority = (float) $matches[1];
+        } elseif ( preg_match( '/^(\d+(?:\.\d+)?)x$/i', $descriptor, $matches ) ) {
+            $priority = (float) $matches[1] * 1000;
+        } else {
+            $priority = 0.5;
+        }
+
+        if ( $priority >= $selected_priority ) {
+            $selected_priority = $priority;
+            $selected_link     = $link;
         }
     }
 
-    return $links;
+    return $selected_link;
 }
 
 /**

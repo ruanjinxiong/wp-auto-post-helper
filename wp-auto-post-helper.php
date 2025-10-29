@@ -359,15 +359,6 @@ add_action( 'wp_ajax_wpaph_recount_media_usage', 'wpaph_ajax_recount_media_usage
  * @return array|WP_Error Summary data about the recount operation.
  */
 function wpaph_recount_media_usage_counts() {
-    $attachment_ids = get_posts(
-        [
-            'post_type'      => 'attachment',
-            'post_status'    => 'any',
-            'posts_per_page' => -1,
-            'fields'         => 'ids',
-        ]
-    );
-
     $transient_key        = 'wpaph_usage_link_counts';
     $usage_links          = [];
     $usage_total          = 0;
@@ -435,19 +426,26 @@ function wpaph_recount_media_usage_counts() {
 
     set_transient( $transient_key, $usage_links, HOUR_IN_SECONDS );
 
-    foreach ( $attachment_ids as $attachment_id ) {
-        if ( 'attachment' !== get_post_type( $attachment_id ) ) {
+    global $wpdb;
+
+    $rows = $wpdb->get_results(
+        $wpdb->prepare(
+            "SELECT p.ID, pm.meta_value FROM {$wpdb->posts} AS p INNER JOIN {$wpdb->postmeta} AS pm ON p.ID = pm.post_id WHERE p.post_type = %s AND pm.meta_key = %s",
+            'attachment',
+            '_wp_attached_file'
+        ),
+        ARRAY_A
+    );
+
+    foreach ( (array) $rows as $row ) {
+        if ( ! isset( $row['ID'] ) ) {
             continue;
         }
 
-        $file = get_post_meta( $attachment_id, '_wp_attached_file', true );
-
-        if ( ! is_string( $file ) || '' === $file ) {
-            $file = '';
-        }
-
-        $normalized = $file ? wpaph_normalize_relative_path_for_attachment( $file ) : '';
-        $count      = ( $normalized && isset( $usage_links[ $normalized ] ) ) ? (int) $usage_links[ $normalized ] : 0;
+        $attachment_id = (int) $row['ID'];
+        $file          = isset( $row['meta_value'] ) && is_string( $row['meta_value'] ) ? $row['meta_value'] : '';
+        $normalized    = $file ? wpaph_normalize_relative_path_for_attachment( $file ) : '';
+        $count         = ( $normalized && isset( $usage_links[ $normalized ] ) ) ? (int) $usage_links[ $normalized ] : 0;
 
         $attachments_touched++;
 
